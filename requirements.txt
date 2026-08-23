@@ -2,7 +2,7 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 sqlalchemy==2.0.43
-psycopg[binary]==3.2.13
+psycopg[binary]==3.2.9
 pydantic==2.11.7
 pydantic-settings==2.10.1
 celery==5.5.3
@@ -33,3 +33,4 @@ pytesseract>=0.3.13,<1
 datasets>=3.0,<5
 
 safetensors>=0.5,<1
+torchcodec>=0.12,<1

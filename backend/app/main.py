@@ -2,16 +2,32 @@ from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pathlib import Path
+from fastapi.responses import FileResponse
+from datetime import datetime, timezone
 import json
 from backend.app.db.session import Base,engine,get_db
-from backend.app.models.entities import Incident,Evidence,AnalysisResult,ChainOfCustody,Entity,Report
-from backend.app.schemas.api import IncidentCreate,IncidentOut,AnalysisOut
+from backend.app.models.entities import Incident,Evidence,AnalysisResult,ChainOfCustody,Entity,Report,CaseSubmission,CaseMessage
+from backend.app.schemas.api import IncidentCreate,IncidentOut,AnalysisOut,CaseStatusUpdate,CaseMessageCreate
 from backend.app.services.evidence import save_upload
 from backend.app.forensics.metadata import extract_metadata
 from backend.app.forensics.ocr import extract_text
 from backend.app.forensics.entities import extract_entities
 from backend.app.forensics.risk import assess
 from backend.app.core.config import settings
+
+
+def make_json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): make_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [make_json_safe(v) for v in value]
+    if hasattr(value, "item") and callable(value.item):
+        try: return make_json_safe(value.item())
+        except (ValueError, TypeError): pass
+    if hasattr(value, "tolist") and callable(value.tolist):
+        try: return make_json_safe(value.tolist())
+        except (ValueError, TypeError): pass
+    return value
 
 Base.metadata.create_all(engine)
 app=FastAPI(title='Aletheia Forensics API',version='1.0.0')
@@ -32,7 +48,84 @@ def health(): return {'status':'ok','service':'aletheia'}
 
 @app.post('/incidents',response_model=IncidentOut)
 def create_incident(body:IncidentCreate,db:Session=Depends(get_db)):
-    obj=Incident(title=body.title,description=body.description); db.add(obj); db.commit(); db.refresh(obj); return obj
+    obj=Incident(title=body.title,description=body.description); db.add(obj); db.flush()
+    if body.citizen_username:
+        submission=CaseSubmission(
+            incident_id=obj.id,
+            citizen_username=body.citizen_username,
+            citizen_name=body.citizen_name or body.citizen_username,
+            citizen_email=body.citizen_email or '',
+            status='PENDING_REVIEW'
+        )
+        db.add(submission)
+        db.add(CaseMessage(
+            incident_id=obj.id,
+            sender_role='system',
+            sender_name='Aletheia',
+            message='Case submitted successfully and is awaiting investigator review.'
+        ))
+    db.commit(); db.refresh(obj); return obj
+
+
+def submission_payload(row, db):
+    evidences=db.query(Evidence).filter(Evidence.incident_id==row.incident_id).order_by(Evidence.created_at.asc() if hasattr(Evidence,'created_at') else Evidence.id.asc()).all()
+    attachments=[{
+        'id':e.id,
+        'filename':e.original_filename,
+        'mime_type':e.mime_type,
+        'file_size':e.file_size,
+        'sha256':e.sha256,
+        'url':f'/evidence/{e.id}/content'
+    } for e in evidences]
+    return {
+        'id':row.id,'incident_id':row.incident_id,'citizen_username':row.citizen_username,
+        'citizen_name':row.citizen_name,'citizen_email':row.citizen_email,'status':row.status,
+        'investigator_note':row.investigator_note,'created_at':row.created_at.isoformat(),
+        'updated_at':row.updated_at.isoformat(),'attachments':attachments
+    }
+
+@app.get('/submissions')
+def list_submissions(db:Session=Depends(get_db)):
+    rows=db.query(CaseSubmission).order_by(CaseSubmission.updated_at.desc()).all()
+    return [submission_payload(r,db) for r in rows]
+
+@app.get('/submissions/mine')
+def list_my_submissions(citizen_username:str,db:Session=Depends(get_db)):
+    rows=db.query(CaseSubmission).filter(CaseSubmission.citizen_username==citizen_username).order_by(CaseSubmission.updated_at.desc()).all()
+    return [submission_payload(r,db) for r in rows]
+
+@app.patch('/submissions/{submission_id}')
+def update_submission(submission_id:str,body:CaseStatusUpdate,db:Session=Depends(get_db)):
+    row=db.get(CaseSubmission,submission_id)
+    if not row: raise HTTPException(404,'Submission not found')
+    row.status=body.status
+    row.investigator_note=body.note
+    row.updated_at=datetime.now(timezone.utc)
+    db.add(CaseMessage(
+        incident_id=row.incident_id,
+        sender_role='investigator',
+        sender_name='Investigator',
+        message=(body.note.strip() if body.note and body.note.strip() else f'Case status changed to {body.status.replace("_"," ").title()}.')
+    ))
+    db.commit()
+    return {'ok':True}
+
+@app.get('/submissions/{submission_id}/messages')
+def get_submission_messages(submission_id:str,db:Session=Depends(get_db)):
+    row=db.get(CaseSubmission,submission_id)
+    if not row: raise HTTPException(404,'Submission not found')
+    msgs=db.query(CaseMessage).filter(CaseMessage.incident_id==row.incident_id).order_by(CaseMessage.created_at.asc()).all()
+    return [{'id':m.id,'sender_role':m.sender_role,'sender_name':m.sender_name,'message':m.message,'created_at':m.created_at.isoformat()} for m in msgs]
+
+@app.post('/submissions/{submission_id}/messages')
+def send_submission_message(submission_id:str,body:CaseMessageCreate,sender_role:str='citizen',sender_name:str='Citizen',db:Session=Depends(get_db)):
+    row=db.get(CaseSubmission,submission_id)
+    if not row: raise HTTPException(404,'Submission not found')
+    if not body.message.strip(): raise HTTPException(400,'Message cannot be empty')
+    db.add(CaseMessage(incident_id=row.incident_id,sender_role=sender_role,sender_name=sender_name,message=body.message.strip()))
+    row.updated_at=datetime.now(timezone.utc)
+    db.commit()
+    return {'ok':True}
 
 @app.get('/incidents/{id}',response_model=IncidentOut)
 def get_incident(id:str,db:Session=Depends(get_db)): return incident_or_404(db,id)
@@ -82,15 +175,33 @@ def analyze_image(evidence_id:str,db:Session=Depends(get_db)):
     if not e.mime_type.startswith('image/'):
         raise HTTPException(400,'Deepfake image detection requires an image file. Use OCR/metadata for documents.')
     from ml.image.infer import ImageDetector
-    try: out=ImageDetector().predict(e.storage_path)
+    try:
+        out=ImageDetector().predict(e.storage_path)
+        out=make_json_safe(out)
     except Exception as ex: raise HTTPException(503,f'Image detector unavailable: {ex}')
     a=AnalysisResult(evidence_id=e.id,analysis_type='image',result_json=out,model_version=out['model_version']); db.add(a); db.commit(); db.refresh(a); return a
+
+@app.post('/analysis/document',response_model=AnalysisOut)
+def analyze_document(evidence_id:str,db:Session=Depends(get_db)):
+    e=evidence_or_404(db,evidence_id)
+    if not e.mime_type.startswith('image/'):
+        raise HTTPException(400,'Document forgery screening requires an image file.')
+    from ml.document.infer import DocumentForgeryDetector
+    try:
+        out=DocumentForgeryDetector().predict(e.storage_path)
+        out=make_json_safe(out)
+    except Exception as ex:
+        raise HTTPException(503,f'Document forgery detector unavailable: {ex}')
+    a=AnalysisResult(evidence_id=e.id,analysis_type='document',result_json=out,model_version=out['model_version'])
+    db.add(a); db.commit(); db.refresh(a); return a
 
 @app.post('/analysis/audio',response_model=AnalysisOut)
 def analyze_audio(evidence_id:str,db:Session=Depends(get_db)):
     e=evidence_or_404(db,evidence_id)
     from ml.audio.infer import AudioDetector
-    try: out=AudioDetector().predict(e.storage_path)
+    try:
+        out=AudioDetector().predict(e.storage_path)
+        out=make_json_safe(out)
     except Exception as ex: raise HTTPException(503,f'Audio detector unavailable: {ex}')
     a=AnalysisResult(evidence_id=e.id,analysis_type='audio',result_json=out,model_version=out['model_version']); db.add(a); db.commit(); db.refresh(a); return a
 
@@ -98,7 +209,9 @@ def analyze_audio(evidence_id:str,db:Session=Depends(get_db)):
 def analyze_video(evidence_id:str,db:Session=Depends(get_db)):
     e=evidence_or_404(db,evidence_id)
     from ml.video.infer import VideoDetector
-    try: out=VideoDetector().predict(e.storage_path)
+    try:
+        out=VideoDetector().predict(e.storage_path)
+        out=make_json_safe(out)
     except Exception as ex: raise HTTPException(503,f'Video detector unavailable: {ex}')
     a=AnalysisResult(evidence_id=e.id,analysis_type='video',result_json=out,model_version=out['model_version']); db.add(a); db.commit(); db.refresh(a); return a
 
