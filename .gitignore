@@ -1,0 +1,53 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+
+# Local runtime data
+storage/
+*.db
+*.sqlite
+
+# Datasets and generated indexes
+datasets/
+*.parquet
+*.arrow
+
+# Model weights and caches - NEVER commit these
+models/*
+!models/.gitkeep
+.local/
+.cache/
+.huggingface/
+
+# ML artifacts
+mlruns/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+
+# Reports generated at runtime
+reports/generated/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

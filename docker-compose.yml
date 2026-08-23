@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_USER: aletheia, POSTGRES_PASSWORD: aletheia, POSTGRES_DB: aletheia}
+    ports: ['5432:5432']
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U aletheia -d aletheia']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  redis:
+    image: redis:7
+    ports: ['6379:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.3.2
+    command: mlflow server --host 0.0.0.0 --port 5000
+    ports: ['5000:5000']
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  backend:
+    build: {context: ., dockerfile: docker/backend.Dockerfile}
+    environment:
+      DATABASE_URL: postgresql+psycopg://aletheia:aletheia@postgres:5432/aletheia
+      REDIS_URL: redis://redis:6379/0
+      MLFLOW_URI: http://mlflow:5000
+      STORAGE_DIR: /app/storage
+      MODEL_DIR: /app/models
+      HF_HOME: /app/models/hf_cache
+      TRANSFORMERS_CACHE: /app/models/hf_cache
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    volumes:
+      - ${ALETHEIA_MODEL_CACHE:-./.local/model-cache}:/app/models
+      - ${ALETHEIA_STORAGE_DIR:-./storage}:/app/storage
+    ports: ['8000:8000']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+  frontend:
+    build: {context: ./frontend, dockerfile: ../docker/frontend.Dockerfile}
+    ports: ['5173:5173']
+    depends_on:
+      backend:
+        condition: service_started
+volumes: {pgdata: {}}

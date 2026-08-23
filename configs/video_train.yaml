@@ -1,0 +1,9 @@
+data_dir: datasets/video
+image_checkpoint: models/image/best.pt
+output_dir: models/video
+frames: 24
+image_size: 224
+batch_size: 2
+epochs: 5
+lr: 0.0001
+seed: 42

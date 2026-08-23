@@ -1,0 +1,10 @@
+data_dir: datasets/audio
+output_dir: models/audio
+sample_rate: 16000
+seconds: 4
+batch_size: 16
+epochs: 5
+lr: 0.0003
+val_fraction: 0.15
+test_fraction: 0.15
+seed: 42

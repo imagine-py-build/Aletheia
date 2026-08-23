@@ -1,0 +1,13 @@
+image:
+  checkpoint: models/image/best.pt
+  architecture: efficientnet_b0
+video:
+  checkpoint: models/video/best.pt
+  architecture: cnn_gru
+  max_frames: 24
+audio:
+  checkpoint: models/audio/best.pt
+  architecture: spectrogram_cnn
+nlp:
+  base_model: xlm-roberta-base
+  checkpoint: models/nlp/best

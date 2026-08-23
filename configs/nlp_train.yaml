@@ -1,0 +1,9 @@
+data_file: datasets/nlp/train.csv
+output_dir: models/nlp/best
+base_model: xlm-roberta-base
+max_length: 256
+epochs: 3
+batch_size: 8
+learning_rate: 0.00002
+seed: 42
+labels: threat,blackmail,sextortion,financial_coercion
