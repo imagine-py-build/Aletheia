@@ -186,7 +186,7 @@ def analyze_document(evidence_id:str,db:Session=Depends(get_db)):
     e=evidence_or_404(db,evidence_id)
     if not e.mime_type.startswith('image/'):
         raise HTTPException(400,'Document forgery screening requires an image file.')
-    from ml.document.infer import DocumentForgeryDetector
+    from backend.app.ml.document.infer import DocumentForgeryDetector
     try:
         out=DocumentForgeryDetector().predict(e.storage_path)
         out=make_json_safe(out)

@@ -1,8 +1,5 @@
 import cv2
-import math
-import tempfile
-from statistics import mean, median
-
+import torch
 from PIL import Image
 
 from ml.image.infer import ImageDetector
@@ -10,246 +7,273 @@ from ml.image.infer import ImageDetector
 
 class VideoDetector:
     """
-    Multi-frame video deepfake screening using the trained image detector.
+    Multi-frame video screening.
 
-    Important:
-    This is a frame-ensemble detector, not a trained temporal video model.
-    It improves the previous implementation by:
-      - sampling more frames when possible
-      - avoiding duplicate frame indexes
-      - using robust top-frame aggregation instead of a plain mean
-      - retaining frame-level evidence and suspicious timestamps
-      - returning only HUMAN or AI-GENERATED as the final label
+    Current architecture:
+        video
+          -> uniformly sampled frames
+          -> image deepfake detector
+          -> robust frame aggregation
+          -> video-level decision
 
-    The final result is still an AI-assisted screening result and should not
-    be treated as legal certainty.
+    This is NOT a temporal deepfake model.
     """
 
-    def __init__(self, max_frames=32, suspicious_threshold=0.65):
+    def __init__(self, max_frames=24):
         self.detector = ImageDetector()
         self.max_frames = max_frames
-        self.suspicious_threshold = suspicious_threshold
-
-    @staticmethod
-    def _sample_indexes(total_frames, max_frames):
-        """Return evenly distributed, unique frame indexes."""
-        if total_frames <= 0:
-            return []
-
-        count = min(max_frames, total_frames)
-
-        if count == 1:
-            return [0]
-
-        # Integer interpolation without torch so there are no accidental
-        # duplicate indexes caused by rounding.
-        indexes = []
-        for i in range(count):
-            idx = round(i * (total_frames - 1) / (count - 1))
-            if not indexes or idx != indexes[-1]:
-                indexes.append(idx)
-
-        return indexes
-
-    @staticmethod
-    def _safe_probability(value):
-        """Convert detector output to a valid probability."""
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return 0.0
-
-        return max(0.0, min(1.0, value))
-
-    @staticmethod
-    def _aggregate(values):
-        """
-        Robust aggregation.
-
-        A plain mean can hide a deepfake when only some frames contain strong
-        manipulation evidence. We therefore combine:
-          - overall mean
-          - median
-          - mean of the strongest 25% of frames
-          - 75th percentile
-
-        The top-frame component gives intermittent AI artifacts more influence
-        while the mean/median components prevent a single bad frame from
-        automatically deciding the whole video.
-        """
-        if not values:
-            raise ValueError("No frame scores available")
-
-        ordered = sorted(values)
-        n = len(ordered)
-
-        overall_mean = mean(ordered)
-        middle = median(ordered)
-
-        top_count = max(1, math.ceil(n * 0.25))
-        top_mean = mean(ordered[-top_count:])
-
-        # Linear interpolation for the 75th percentile.
-        if n == 1:
-            q75 = ordered[0]
-        else:
-            position = 0.75 * (n - 1)
-            lower = math.floor(position)
-            upper = math.ceil(position)
-
-            if lower == upper:
-                q75 = ordered[lower]
-            else:
-                fraction = position - lower
-                q75 = (
-                    ordered[lower] * (1.0 - fraction)
-                    + ordered[upper] * fraction
-                )
-
-        # Robust ensemble score.
-        #
-        # Top-frame evidence receives the greatest weight because AI video
-        # artifacts can be intermittent after social-media recompression.
-        score = (
-            0.45 * top_mean
-            + 0.25 * q75
-            + 0.20 * overall_mean
-            + 0.10 * middle
-        )
-
-        return {
-            "aggregate": max(0.0, min(1.0, score)),
-            "mean": overall_mean,
-            "median": middle,
-            "top_25_percent_mean": top_mean,
-            "q75": q75,
-            "top_frame_count": top_count,
-        }
 
     def predict(self, path):
+
         cap = cv2.VideoCapture(str(path))
 
         if not cap.isOpened():
-            raise ValueError("Unable to open video")
+            raise ValueError(
+                "Unable to open video file."
+            )
 
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        total_frames = int(
+            cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        )
 
-        if total <= 0:
+        fps = (
+            cap.get(cv2.CAP_PROP_FPS)
+            or 25.0
+        )
+
+        if total_frames <= 0:
             cap.release()
-            raise ValueError("No decodable video frames")
+            raise ValueError(
+                "Video contains no decodable frames."
+            )
 
-        indexes = self._sample_indexes(total, self.max_frames)
-        frame_scores = []
+        sample_count = min(
+            self.max_frames,
+            total_frames,
+        )
 
-        for idx in indexes:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        # Uniform sampling.
+        indices = torch.linspace(
+            0,
+            total_frames - 1,
+            sample_count,
+        ).round().long().tolist()
+
+        frame_results = []
+
+        for frame_index in indices:
+
+            cap.set(
+                cv2.CAP_PROP_POS_FRAMES,
+                int(frame_index),
+            )
+
             ok, frame = cap.read()
 
-            if not ok or frame is None:
+            if not ok:
                 continue
 
-            try:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                image = Image.fromarray(rgb)
+            rgb = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB,
+            )
 
-                # ImageDetector currently accepts a file path, so use a
-                # temporary JPEG for each sampled frame.
-                with tempfile.NamedTemporaryFile(
-                    suffix=".jpg", delete=True
-                ) as tmp:
-                    image.save(tmp.name, format="JPEG", quality=95)
-                    out = self.detector.predict(tmp.name)
+            image = Image.fromarray(rgb)
 
-                fake_probability = self._safe_probability(
-                    out.get("fake_probability", 0.0)
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".jpg"
+            ) as temporary:
+
+                image.save(
+                    temporary.name,
+                    format="JPEG",
+                    quality=95,
                 )
 
-                frame_scores.append(
-                    {
-                        "frame": int(idx),
-                        "timestamp": round(idx / fps, 3),
-                        "fake_probability": round(fake_probability, 6),
-                    }
+                result = self.detector.predict(
+                    temporary.name
                 )
 
-            except Exception:
-                # A bad individual frame should not destroy the entire
-                # video analysis.
-                continue
+            probability = float(
+                result["fake_probability"]
+            )
+
+            timestamp = (
+                frame_index / fps
+            )
+
+            frame_results.append(
+                {
+                    "frame": int(frame_index),
+                    "timestamp": round(
+                        timestamp,
+                        3,
+                    ),
+                    "fake_probability": round(
+                        probability,
+                        4,
+                    ),
+                }
+            )
 
         cap.release()
 
-        if not frame_scores:
-            raise ValueError("No decodable sampled frames")
+        if not frame_results:
+            raise ValueError(
+                "No decodable sampled frames."
+            )
 
-        values = [x["fake_probability"] for x in frame_scores]
-        stats = self._aggregate(values)
-        aggregate = stats["aggregate"]
+        scores = torch.tensor(
+            [
+                x["fake_probability"]
+                for x in frame_results
+            ],
+            dtype=torch.float32,
+        )
 
-        # Mark frames that contain meaningful suspicious evidence.
-        suspicious = [
-            x
-            for x in frame_scores
-            if x["fake_probability"] >= self.suspicious_threshold
+        mean_score = float(
+            scores.mean().item()
+        )
+
+        median_score = float(
+            scores.median().item()
+        )
+
+        max_score = float(
+            scores.max().item()
+        )
+
+        # Use top 25% rather than only one strongest frame.
+        top_count = max(
+            3,
+            int(len(scores) * 0.25),
+        )
+
+        top_scores = torch.topk(
+            scores,
+            k=min(top_count, len(scores)),
+        ).values
+
+        top_mean = float(
+            top_scores.mean().item()
+        )
+
+        # Count how consistently suspicious the video is.
+        suspicious_threshold = 0.60
+
+        suspicious_frames = int(
+            (
+                scores >= suspicious_threshold
+            ).sum().item()
+        )
+
+        suspicious_ratio = (
+            suspicious_frames / len(scores)
+        )
+
+        # More robust than:
+        # "one frame > threshold = fake"
+        ai_generated = (
+            (
+                top_mean >= 0.60
+                and suspicious_ratio >= 0.20
+            )
+            or (
+                median_score >= 0.55
+                and suspicious_ratio >= 0.35
+            )
+        )
+
+        label = (
+            "AI_GENERATED"
+            if ai_generated
+            else "HUMAN"
+        )
+
+        if ai_generated:
+            confidence = min(
+                0.99,
+                0.50
+                + 0.30 * top_mean
+                + 0.20 * suspicious_ratio,
+            )
+        else:
+            confidence = min(
+                0.99,
+                0.50
+                + 0.50 * (1.0 - median_score),
+            )
+
+        suspicious_timestamps = [
+            x["timestamp"]
+            for x in frame_results
+            if x["fake_probability"]
+            >= 0.75
         ]
-
-        # Strongest frames first for investigator review.
-        strongest = sorted(
-            frame_scores,
-            key=lambda x: x["fake_probability"],
-            reverse=True,
-        )[: min(8, len(frame_scores))]
-
-        # Final binary decision.
-        #
-        # 0.50 is the midpoint of the model probability. The robust
-        # aggregation above prevents the old plain-average calculation from
-        # washing out intermittent strong evidence.
-        label = "AI-GENERATED" if aggregate >= 0.50 else "HUMAN"
 
         return {
             "label": label,
-            "fake_probability": round(aggregate, 6),
-            "real_probability": round(1.0 - aggregate, 6),
-            "confidence": round(max(aggregate, 1.0 - aggregate), 6),
 
-            "model_version": (
+            "fake_probability": round(
+                median_score,
+                4,
+            ),
+
+            "real_probability": round(
+                1.0 - median_score,
+                4,
+            ),
+
+            "confidence": round(
+                float(confidence),
+                4,
+            ),
+
+            "model_version":
                 "CommunityForensics-DeepfakeDet-ViT "
-                "robust frame ensemble"
+                "multi-frame ensemble",
+
+            "sampled_frames":
+                len(frame_results),
+
+            "fps":
+                round(float(fps), 3),
+
+            "mean_fake_probability":
+                round(mean_score, 4),
+
+            "median_fake_probability":
+                round(median_score, 4),
+
+            "max_fake_probability":
+                round(max_score, 4),
+
+            "top_frame_mean":
+                round(top_mean, 4),
+
+            "suspicious_frame_ratio":
+                round(suspicious_ratio, 4),
+
+            "frame_scores":
+                frame_results,
+
+            "suspicious_timestamps":
+                suspicious_timestamps,
+
+            "decision": (
+                "Consistent visual AI/deepfake indicators "
+                "were detected across sampled frames."
+                if ai_generated
+                else
+                "The sampled frames did not contain "
+                "sufficiently consistent AI/deepfake indicators."
             ),
 
-            "sampled_frames": len(frame_scores),
-            "total_video_frames": total,
-            "fps": round(fps, 3),
-
-            # Aggregation diagnostics make the result auditable.
-            "aggregation": {
-                "method": "robust_top_quartile_ensemble",
-                "mean": round(stats["mean"], 6),
-                "median": round(stats["median"], 6),
-                "top_25_percent_mean": round(
-                    stats["top_25_percent_mean"], 6
-                ),
-                "q75": round(stats["q75"], 6),
-                "top_frame_count": stats["top_frame_count"],
-            },
-
-            "frame_scores": frame_scores,
-
-            "suspicious_timestamps": [
-                x["timestamp"] for x in suspicious
-            ],
-
-            "strongest_frames": strongest,
-
-            "interpretation": (
-                "AI-assisted multi-frame visual screening. "
-                "The result combines the overall frame distribution with "
-                "the strongest 25% of frames so intermittent manipulation "
-                "evidence is not hidden by social-media recompression. "
-                "This remains a frame-ensemble method, not a trained "
-                "temporal deepfake model, and should not be treated as "
-                "legal certainty."
-            ),
+            "interpretation":
+                "Multi-frame visual screening using an "
+                "image detector. This implementation does "
+                "not model temporal relationships between "
+                "frames. Human forensic verification remains required.",
         }

@@ -34,3 +34,4 @@ datasets>=3.0,<5
 
 safetensors>=0.5,<1
 torchcodec>=0.12,<1
+PyMuPDF
